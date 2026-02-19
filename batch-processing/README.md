@@ -1,13 +1,14 @@
 # Batch PDF download with change detection
 
-**Discovers all PDFs** in the server’s **source_pdf** folder (no need to list every URL). Downloads them into **download_pdf** and only re-downloads when content has changed (ETag or SHA-256 hash).
+**Discovers all PDFs** in the server’s **source_pdf** folder (no need to list every URL). New or changed PDFs are written to **processed_pdf** (full mirror) and **unprocessed_pdf** (only new/changed, for manual copy).
 
 ## Folders
 
 | Folder | Purpose | GitHub |
 |--------|---------|--------|
-| **source_pdf/** | Config only: `config.json` (server URL + optional list API). No manual URL list. | ✅ Commit this |
-| **download_pdf/** | Where PDFs are downloaded. | ❌ Ignored (in .gitignore) |
+| **source_pdf/** | Config only: `config.json` (server URL + optional list API). | ✅ Commit this |
+| **download_pdf/processed_pdf/** | All PDFs from the server (for comparison/versioning). Same as current server state. | ❌ Ignored |
+| **download_pdf/unprocessed_pdf/** | Empty at start of each run. Only **new** or **changed** PDFs from that run are copied here so you can copy them manually and know they are only new or updated. | ❌ Ignored |
 
 ## Setup
 
@@ -28,7 +29,7 @@ pip install -r requirements.txt
 python batch_processing.py
 ```
 
-The script **lists every PDF** in the server’s source_pdf folder (via your list URL or directory listing), then downloads new or changed files into **download_pdf**. You don’t need to maintain urls.txt.
+The script lists every PDF from the server, then for each file: if **new or changed**, it downloads and writes to both **processed_pdf** and **unprocessed_pdf**; if **unchanged**, it skips (file stays only in processed_pdf). At the start of each run, **unprocessed_pdf** is cleared so it contains only that run’s new/changed PDFs.
 
 Verify that the server list works (no download):
 
@@ -54,7 +55,7 @@ Put **source_pdf/config.json** (copy from **config.json.example**):
     - **JSON**: array of filenames (`["a.pdf", "b.pdf"]`) or full URLs; or object with key `files` / `pdfs` / `items` / `data` containing that array.
     - **HTML**: page with links like `<a href="x.pdf">`; the script collects all `.pdf` links.
 
-The script then downloads each discovered PDF into **download_pdf** and skips unchanged ones (ETag/hash).
+New or changed PDFs are written to **download_pdf/processed_pdf** (full mirror) and **download_pdf/unprocessed_pdf** (only new/changed). Unchanged PDFs are skipped (already in processed_pdf).
 
 ## Fallbacks
 
@@ -68,5 +69,8 @@ The script then downloads each discovered PDF into **download_pdf** and skips un
 | `batch_processing.py` | Main script |
 | `source_pdf/config.json` | Server base URL + optional list URL. Commit to GitHub (or .gitignore if secret). |
 | `source_pdf/urls.txt` | Fallback manual list (one URL per line) when server discovery is not used. |
-| `download_pdf/` | Downloaded PDFs (local only). |
+| `download_pdf/processed_pdf/` | All PDFs from server (mirror for comparison). |
+| `download_pdf/unprocessed_pdf/` | Only new or changed PDFs from the last run (for manual copy). |
 | `download_state.json` | ETag/hash per URL; used to skip unchanged files (local only). |
+
+If you had PDFs directly in **download_pdf/** before, move them into **download_pdf/processed_pdf/** so the script does not re-download them.
