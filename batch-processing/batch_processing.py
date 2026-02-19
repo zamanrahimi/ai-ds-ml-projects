@@ -58,6 +58,7 @@ UNPROCESSED_DIR = DOWNLOAD_DIR / "unprocessed_pdf"
 
 # ── Shared HTTP session ───────────────────────────────────────────────────────
 # One session is reused for all requests (connection pooling, shared headers).
+# Auth is configured later in apply_auth_from_config() once config.json is loaded.
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "BatchPDFProcessor/1.0"})
 
@@ -123,6 +124,80 @@ def load_config() -> dict:
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def apply_auth_from_config(config: dict) -> None:
+    """Read auth settings from config and apply them to the shared SESSION.
+
+    Supported auth types (set "auth_type" in config.json):
+
+      "bearer"   — Authorization: Bearer <token>
+                   config keys: auth_type, token
+
+      "basic"    — HTTP Basic Auth (username + password)
+                   config keys: auth_type, username, password
+
+      "api_key"  — Custom header with an API key
+                   config keys: auth_type, api_key_header (e.g. "X-Api-Key"), api_key_value
+
+      (omitted)  — No auth; session stays as-is (default for public URLs)
+
+    All values come from source_pdf/config.json — never hard-coded in the script.
+
+    Example config.json for Bearer token (GitHub PAT):
+      {
+        "source_pdf_list_url": "https://api.github.com/repos/USER/REPO/contents/folder",
+        "auth_type": "bearer",
+        "token": "ghp_xxxxxxxxxxxx"
+      }
+
+    Example config.json for Basic Auth:
+      {
+        "api_endpoint": "https://internal.company.com/api/pdfs",
+        "auth_type": "basic",
+        "username": "myuser",
+        "password": "mypassword"
+      }
+
+    Example config.json for API key header:
+      {
+        "api_endpoint": "https://service.example.com/api/pdfs",
+        "auth_type": "api_key",
+        "api_key_header": "X-Api-Key",
+        "api_key_value": "abc123secret"
+      }
+    """
+    auth_type = (config.get("auth_type") or "").strip().lower()
+
+    if auth_type == "bearer":
+        token = (config.get("token") or "").strip()
+        if token:
+            SESSION.headers.update({"Authorization": f"Bearer {token}"})
+            print("Auth: Bearer token applied.")
+        else:
+            print("Warning: auth_type is 'bearer' but 'token' is missing in config.json.")
+
+    elif auth_type == "basic":
+        username = (config.get("username") or "").strip()
+        password = (config.get("password") or "")
+        if username:
+            SESSION.auth = (username, password)
+            print(f"Auth: Basic auth applied (user: {username}).")
+        else:
+            print("Warning: auth_type is 'basic' but 'username' is missing in config.json.")
+
+    elif auth_type == "api_key":
+        header_name = (config.get("api_key_header") or "").strip()
+        header_value = (config.get("api_key_value") or "").strip()
+        if header_name and header_value:
+            SESSION.headers.update({header_name: header_value})
+            print(f"Auth: API key header '{header_name}' applied.")
+        else:
+            print("Warning: auth_type is 'api_key' but 'api_key_header' or 'api_key_value' is missing.")
+
+    elif auth_type:
+        print(f"Warning: Unknown auth_type '{auth_type}' in config.json. No auth applied.")
+    # else: no auth_type set → public URL, nothing to do
 
 
 def _normalize_base_url(url: str) -> str:
@@ -280,6 +355,9 @@ def get_urls_to_process() -> tuple[list[str], str]:
     Returns (list_of_urls, human_readable_source_description)."""
     SOURCE_PDF_DIR.mkdir(parents=True, exist_ok=True)
     config = load_config()
+
+    # Apply auth from config before any HTTP request is made
+    apply_auth_from_config(config)
 
     # Priority 1: server folder auto-discovery
     base_url = config.get("source_pdf_base_url")
