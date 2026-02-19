@@ -1,0 +1,9 @@
+# Downloaded PDFs and local state (not committed; source_pdf is the source on GitHub)
+download_pdf/
+download_state.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.venv/

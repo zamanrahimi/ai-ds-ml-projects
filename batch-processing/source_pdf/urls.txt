@@ -1,0 +1,6 @@
+# One PDF URL per line. Lines starting with # are ignored.
+# Commit this folder (source_pdf) to GitHub. Script reads from here and downloads into download_pdf.
+https://www.learningcontainer.com/wp-content/uploads/2019/09/sample-pdf-file.pdf
+https://pdfobject.com/pdf/sample.pdf
+https://unec.edu.az/application/uploads/2014/12/pdf-sample.pdf
+https://www.ets.org/Media/Research/pdf/RM-18-01.pdf
