@@ -1,24 +1,30 @@
 """
-Batch download PDFs from a test server. Only re-downloads files when their content
-has changed (using ETag from server, then SHA-256 hash comparison).
+Batch download PDFs from a server. Discovers all PDFs in the server's source_pdf folder
+(list API or directory listing); only re-downloads when content has changed (ETag/hash).
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
+from urllib.parse import urljoin
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:
+    print("Missing dependency: requests. Install with:", file=sys.stderr)
+    print("  pip install -r requirements.txt", file=sys.stderr)
+    print("Or: pip install requests", file=sys.stderr)
+    sys.exit(1)
 
 BASE_DIR = Path(__file__).resolve().parent
-# source_pdf: list/config (urls.txt, config.json). Commit this folder to GitHub.
 SOURCE_PDF_DIR = BASE_DIR / "source_pdf"
 URLS_FILE = SOURCE_PDF_DIR / "urls.txt"
-CONFIG_FILE = SOURCE_PDF_DIR / "config.json"  # Optional: { "api_endpoint": "https://..." }
+CONFIG_FILE = SOURCE_PDF_DIR / "config.json"
 
 STATE_FILE = BASE_DIR / "download_state.json"
-# download_pdf: PDFs are downloaded here (from URLs in source_pdf or from API).
 DOWNLOAD_DIR = BASE_DIR / "download_pdf"
 
 SESSION = requests.Session()
@@ -68,6 +74,111 @@ def load_config() -> dict:
         return {}
 
 
+def _normalize_base_url(url: str) -> str:
+    """Ensure base URL ends with / for joining filenames."""
+    url = url.strip().rstrip("/")
+    return url + "/"
+
+
+def _extract_pdf_urls_from_json(data: object, base_url: str) -> list[str]:
+    """From JSON response, extract list of PDF URLs (full URLs or filenames)."""
+    base_normalized = _normalize_base_url(base_url) if base_url else ""
+    urls: list[str] = []
+
+    def add(item: str) -> None:
+        s = item.strip()
+        if not s or not s.lower().endswith(".pdf"):
+            return
+        if s.startswith(("http://", "https://")):
+            urls.append(s)
+        elif base_normalized:
+            urls.append(urljoin(base_normalized, s.lstrip("/")))
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                add(item)
+            elif isinstance(item, dict):
+                # GitHub API: { "name": "file.pdf", "download_url": "https://...", "type": "file" }
+                download_url = item.get("download_url") if isinstance(item.get("download_url"), str) else None
+                if download_url and (item.get("name") or "").lower().endswith(".pdf"):
+                    urls.append(download_url)
+                    continue
+                u = item.get("url") or item.get("name") or item.get("filename") or item.get("file")
+                if u and isinstance(u, str):
+                    add(u)
+        return urls
+
+    if isinstance(data, dict):
+        for key in ("files", "pdfs", "urls", "items", "data", "results", "names"):
+            arr = data.get(key)
+            if isinstance(arr, list):
+                for item in arr:
+                    if isinstance(item, str):
+                        add(item)
+                    elif isinstance(item, dict):
+                        download_url = item.get("download_url") if isinstance(item.get("download_url"), str) else None
+                        if download_url and (item.get("name") or "").lower().endswith(".pdf"):
+                            urls.append(download_url)
+                        else:
+                            u = item.get("url") or item.get("name") or item.get("filename") or item.get("file")
+                            if u and isinstance(u, str):
+                                add(u)
+                if urls:
+                    return urls
+
+    return urls
+
+
+def _extract_pdf_urls_from_html(html: str, base_url: str) -> list[str]:
+    """Parse HTML directory listing for links to .pdf files."""
+    base_url = _normalize_base_url(base_url)
+    # Match href="...something.pdf" or href='...something.pdf'
+    pattern = re.compile(r'href\s*=\s*["\']([^"\']+\.pdf)["\']', re.IGNORECASE)
+    urls = []
+    for match in pattern.finditer(html):
+        path = match.group(1).strip()
+        if path.startswith(("http://", "https://")):
+            urls.append(path)
+        else:
+            urls.append(urljoin(base_url, path))
+    return list(dict.fromkeys(urls))  # dedupe
+
+
+def fetch_pdf_list_from_server(source_pdf_base_url: str, list_url: str | None = None) -> list[str]:
+    """
+    Discover all PDFs in the server's source_pdf folder.
+    - If list_url is set: GET that URL (JSON or HTML). Expects list of filenames or full URLs.
+    - Else: GET source_pdf_base_url and parse as JSON or HTML directory listing.
+    Returns list of full PDF URLs.
+    """
+    base_url = _normalize_base_url(source_pdf_base_url)
+    url_to_fetch = (list_url or source_pdf_base_url).strip()
+
+    r = SESSION.get(url_to_fetch, timeout=60)
+    r.raise_for_status()
+    content_type = (r.headers.get("Content-Type") or "").lower()
+
+    # Try JSON first
+    if "json" in content_type or url_to_fetch.rstrip("/").endswith(".json"):
+        try:
+            data = r.json()
+            return _extract_pdf_urls_from_json(data, base_url)
+        except Exception:
+            pass
+
+    # Try parsing as JSON anyway (some APIs don't set Content-Type)
+    try:
+        data = r.json()
+        return _extract_pdf_urls_from_json(data, base_url)
+    except Exception:
+        pass
+
+    # Parse as HTML (directory listing)
+    text = r.text
+    return _extract_pdf_urls_from_html(text, base_url)
+
+
 def fetch_urls_from_api(api_endpoint: str) -> list[str]:
     """
     GET the API endpoint and parse JSON to extract a list of PDF URLs.
@@ -76,53 +187,44 @@ def fetch_urls_from_api(api_endpoint: str) -> list[str]:
     r = SESSION.get(api_endpoint, timeout=30)
     r.raise_for_status()
     data = r.json()
-
-    # Direct array of strings (URLs)
-    if isinstance(data, list):
-        urls = []
-        for item in data:
-            if isinstance(item, str) and item.startswith(("http://", "https://")):
-                urls.append(item)
-            elif isinstance(item, dict):
-                u = item.get("url") or item.get("link") or item.get("href")
-                if u and isinstance(u, str):
-                    urls.append(u)
-        return urls
-
-    # Object: look for common keys that hold the list
-    if isinstance(data, dict):
-        for key in ("files", "pdfs", "urls", "items", "data", "results"):
-            arr = data.get(key)
-            if isinstance(arr, list):
-                urls = []
-                for item in arr:
-                    if isinstance(item, str) and item.startswith(("http://", "https://")):
-                        urls.append(item)
-                    elif isinstance(item, dict):
-                        u = item.get("url") or item.get("link") or item.get("href") or item.get("file_url")
-                        if u and isinstance(u, str):
-                            urls.append(u)
-                if urls:
-                    return urls
-
-    return []
+    # If API returns full URLs we don't have a base; use empty base and _extract will keep full URLs
+    return _extract_pdf_urls_from_json(data, "")
 
 
 def get_urls_to_process() -> tuple[list[str], str]:
     """
-    Get list of PDF URLs: from API if config has api_endpoint, else from source_pdf/urls.txt.
+    Get list of PDF URLs:
+    1. If config has source_pdf_base_url: list all PDFs from that folder on the server (no urls.txt).
+    2. Else if config has api_endpoint: GET API for list of URLs.
+    3. Else: read source_pdf/urls.txt (manual list).
     Returns (urls, source_description).
     """
     SOURCE_PDF_DIR.mkdir(parents=True, exist_ok=True)
     config = load_config()
-    api_endpoint = config.get("api_endpoint", "").strip() if isinstance(config.get("api_endpoint"), str) else None
 
+    # Prefer: discover every PDF in server's source_pdf folder
+    base_url = config.get("source_pdf_base_url")
+    if base_url and isinstance(base_url, str):
+        list_url = config.get("source_pdf_list_url")
+        if isinstance(list_url, str):
+            list_url = list_url.strip() or None
+        try:
+            urls = fetch_pdf_list_from_server(base_url.strip(), list_url)
+            if urls:
+                return urls, f"server folder ({base_url.strip()})"
+        except Exception as e:
+            print(f"Server list failed: {e}. Trying api_endpoint or urls.txt.")
+
+    # Fallback: API that returns list of PDF URLs
+    api_endpoint = config.get("api_endpoint", "").strip() if isinstance(config.get("api_endpoint"), str) else None
     if api_endpoint:
         try:
             urls = fetch_urls_from_api(api_endpoint)
-            return urls, f"API ({api_endpoint})"
+            if urls:
+                return urls, f"API ({api_endpoint})"
         except Exception as e:
             print(f"API request failed: {e}. Falling back to source_pdf/urls.txt.")
+
     urls = load_urls_from_source_pdf()
     return urls, "source_pdf/urls.txt"
 

@@ -1,3 +1,4 @@
 {
-  "api_endpoint": "https://your-server.com/api/pdfs"
+  "source_pdf_base_url": "https://github.com/OWNER/REPO/tree/BRANCH/path/to/folder",
+  "source_pdf_list_url": "https://api.github.com/repos/OWNER/REPO/contents/path/to/folder"
 }
